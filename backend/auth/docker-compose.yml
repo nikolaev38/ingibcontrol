@@ -1,0 +1,110 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${APP_PORT}:${APP_PORT}"
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    env_file:
+      - .env
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        chmod +x /app/scripts/*.sh &&
+        /app/scripts/init_certs.sh &&
+        /app/scripts/init_db.sh &&
+        poetry run uvicorn main:app \
+          --host 0.0.0.0 \
+          --port ${APP_PORT} \
+          --log-config /app/configs/log_config.ini
+    depends_on:
+      db:
+        condition: service_healthy
+      loki:
+        condition: service_started
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASS:-postgres}
+      POSTGRES_DB: ${DB_NAME:-test-auth-db}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "${LOKI_PORT}:3100"
+    volumes:
+      - ./configs/loki-config.yaml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    command:
+      - -config.expand-env=true
+      - -config.file=/etc/loki/local-config.yaml
+    environment:
+      LOKI_PORT: ${LOKI_PORT}
+
+  promtail:
+    image: grafana/promtail:latest
+    volumes:
+      - ./configs/promtail-config.yaml:/etc/promtail/config.yaml
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command:
+      - -config.expand-env=true
+      - -config.file=/etc/promtail/config.yaml
+    environment:
+      LOKI_URL: ${LOKI_URL}
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "${GRAFANA_PORT}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    env_file:
+      - .env
+    environment:
+      - ENVIRONMENT=test
+    depends_on:
+      db:
+        condition: service_healthy
+      loki:
+        condition: service_started
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        chmod +x /app/scripts/*.sh &&
+        /app/scripts/init_certs.sh &&
+        /app/scripts/init_db.sh &&
+        poetry install &&
+        poetry run pytest tests/ -s --cov=app --cov-report=term-missing
+
+volumes:
+  postgres_data:
+  loki_data:
+  grafana_data:
